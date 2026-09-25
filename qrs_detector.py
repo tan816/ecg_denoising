@@ -150,7 +150,7 @@ def extract_beat_features(ecg_signal: np.ndarray, r_peaks: np.ndarray, fs: float
         # QRS Duration (Q-index to S-index)
         qrs_duration = (s_idx - q_idx) / fs * 1000.0  # ms
         if qrs_duration <= 0 or qrs_duration > 300:
-            qrs_duration = 80.0  # Normal default baseline
+            qrs_duration = np.nan
             
         # Estimate P-wave peak (max in [-220ms, -80ms] before R)
         p_start = max(0, r_curr - int(0.240 * fs))
@@ -160,8 +160,8 @@ def extract_beat_features(ecg_signal: np.ndarray, r_peaks: np.ndarray, fs: float
             pr_interval = (r_curr - p_idx) / fs * 1000.0
             p_amp = ecg_signal[p_idx]
         else:
-            pr_interval = 140.0
-            p_amp = 0.15
+            pr_interval = np.nan
+            p_amp = np.nan
             
         # Estimate T-wave peak (max in [+150ms, +350ms] after R)
         t_start = min(N, r_curr + int(0.150 * fs))
@@ -171,8 +171,8 @@ def extract_beat_features(ecg_signal: np.ndarray, r_peaks: np.ndarray, fs: float
             qt_interval = (t_idx - q_idx) / fs * 1000.0
             t_amp = ecg_signal[t_idx]
         else:
-            qt_interval = 380.0
-            t_amp = 0.3
+            qt_interval = np.nan
+            t_amp = np.nan
             
         r_amp = ecg_signal[r_curr]
         

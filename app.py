@@ -145,6 +145,7 @@ def main():
         pred_condition = "N/A"
         confidence = 0.0
         avg_proba = np.zeros(5)
+        clin_recs = []
 
     # Dashboard Metrics Row
     m1, m2, m3, m4, m5, m6 = st.columns(6)

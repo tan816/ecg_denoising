@@ -13,7 +13,7 @@ Compares diagnostic accuracy and F1 scores between Raw Noisy signals and Filtere
 import numpy as np
 import pandas as pd
 from typing import Dict, Any, Tuple
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, StratifiedGroupKFold
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
 
@@ -38,23 +38,25 @@ CLASS_MAP = {
 CLASS_NAMES = ['NSR', 'Bradycardia', 'Tachycardia', 'AFib', 'PVC']
 
 
-def create_cardiac_dataset(n_samples_per_class: int = 15, fs: int = 360, add_noise: bool = True) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, Dict[str, Any]]:
+def create_cardiac_dataset(n_samples_per_class: int = 15, fs: int = 360, add_noise: bool = True) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, Dict[str, Any]]:
     """
     Generates a multi-condition ECG dataset for raw noisy and DSP filtered signals.
     Returns:
-        X_raw, y_raw, X_filtered, y_filtered, quality_metrics
+        X_raw, y_raw, groups_raw, X_filtered, y_filtered, groups_filtered, quality_metrics
     """
-    X_raw_list, y_list = [], []
-    X_filt_list = []
+    X_raw_list, y_raw_list, groups_raw_list = [], [], []
+    X_filt_list, y_filt_list, groups_filt_list = [], [], []
     
     snr_raw_list, snr_filt_list = [], []
     mse_list, psnr_list = [], []
     
     conditions = ['NSR', 'Bradycardia', 'Tachycardia', 'AFib', 'PVC']
     
+    group_id = 0
     for cond in conditions:
         label = CLASS_MAP[cond]
         for seed in range(n_samples_per_class):
+            group_id += 1
             # Generate clean ECG
             ecg_data = generate_synthetic_ecg(duration_sec=12.0, fs=fs, condition=cond, random_seed=seed * 10 + 5)
             clean_sig = ecg_data['signal']
@@ -87,8 +89,10 @@ def create_cardiac_dataset(n_samples_per_class: int = 15, fs: int = 360, add_noi
                 if len(pt_raw['r_peaks']) >= 3:
                     feats_raw, _ = extract_beat_features(noisy_sig, pt_raw['r_peaks'], fs=fs)
                     for f in feats_raw:
-                        X_raw_list.append(f)
-                        y_list.append(label)
+                        if not np.isnan(f).any():
+                            X_raw_list.append(f)
+                            y_raw_list.append(label)
+                            groups_raw_list.append(group_id)
             except Exception:
                 pass
 
@@ -98,15 +102,20 @@ def create_cardiac_dataset(n_samples_per_class: int = 15, fs: int = 360, add_noi
                 if len(pt_filt['r_peaks']) >= 3:
                     feats_filt, _ = extract_beat_features(filtered_sig, pt_filt['r_peaks'], fs=fs)
                     for f in feats_filt:
-                        X_filt_list.append(f)
+                        if not np.isnan(f).any():
+                            X_filt_list.append(f)
+                            y_filt_list.append(label)
+                            groups_filt_list.append(group_id)
             except Exception:
                 pass
 
-    # Alignment check
-    min_len = min(len(X_raw_list), len(X_filt_list), len(y_list))
-    X_raw = np.array(X_raw_list[:min_len])
-    X_filt = np.array(X_filt_list[:min_len])
-    y = np.array(y_list[:min_len])
+    X_raw = np.array(X_raw_list)
+    y_raw = np.array(y_raw_list)
+    groups_raw = np.array(groups_raw_list)
+    
+    X_filt = np.array(X_filt_list)
+    y_filt = np.array(y_filt_list)
+    groups_filt = np.array(groups_filt_list)
 
     quality_metrics = {
         'avg_snr_raw': float(np.mean(snr_raw_list)),
@@ -116,7 +125,7 @@ def create_cardiac_dataset(n_samples_per_class: int = 15, fs: int = 360, add_noi
         'avg_psnr': float(np.mean(psnr_list))
     }
 
-    return X_raw, X_filt, y, quality_metrics
+    return X_raw, y_raw, groups_raw, X_filt, y_filt, groups_filt, quality_metrics
 
 
 class ECGHeartbeatClassifier:
@@ -140,12 +149,17 @@ class ECGHeartbeatClassifier:
         return self.model.predict_proba(X)
 
     def evaluate(self, X_test: np.ndarray, y_test: np.ndarray) -> Dict[str, Any]:
+        if len(y_test) == 0:
+            return {
+                'accuracy': 0.0, 'precision': 0.0, 'recall': 0.0, 'f1_score': 0.0,
+                'confusion_matrix': np.zeros((5, 5))
+            }
         preds = self.predict(X_test)
         acc = accuracy_score(y_test, preds)
         prec = precision_score(y_test, preds, average='macro', zero_division=0)
         rec = recall_score(y_test, preds, average='macro', zero_division=0)
         f1 = f1_score(y_test, preds, average='macro', zero_division=0)
-        cm = confusion_matrix(y_test, preds)
+        cm = confusion_matrix(y_test, preds, labels=[0, 1, 2, 3, 4])
 
         return {
             'accuracy': float(acc),
@@ -158,29 +172,69 @@ class ECGHeartbeatClassifier:
 
 def run_full_ml_benchmark(n_samples_per_class: int = 15) -> Dict[str, Any]:
     """
-    Runs complete dataset creation, trains classifiers on Raw vs Filtered signals,
-    and returns comparative diagnostic accuracy table & signal quality metrics.
+    Runs complete dataset creation, trains classifiers on Raw vs Filtered signals using 5-Fold Stratified Group CV,
+    and returns comparative diagnostic accuracy table, signal quality metrics, and confusion matrices.
     """
     print("Generating ECG dataset & extracting features...")
-    X_raw, X_filt, y, dsp_metrics = create_cardiac_dataset(n_samples_per_class=n_samples_per_class)
+    X_raw, y_raw, groups_raw, X_filt, y_filt, groups_filt, dsp_metrics = create_cardiac_dataset(n_samples_per_class=n_samples_per_class)
 
-    # Train/Test Split
-    X_raw_tr, X_raw_te, y_tr, y_te = train_test_split(X_raw, y, test_size=0.3, random_state=42, stratify=y)
-    X_filt_tr, X_filt_te, _, _ = train_test_split(X_filt, y, test_size=0.3, random_state=42, stratify=y)
+    sgkf = StratifiedGroupKFold(n_splits=5)
+    
+    def evaluate_cv(X, y, groups):
+        if len(X) == 0:
+             return None, None
+        acc_list, prec_list, rec_list, f1_list = [], [], [], []
+        cm_total = np.zeros((5, 5))
+        for train_idx, test_idx in sgkf.split(X, y, groups):
+            X_tr, X_te = X[train_idx], X[test_idx]
+            y_tr, y_te = y[train_idx], y[test_idx]
+            clf = ECGHeartbeatClassifier(model_type='rf')
+            clf.train(X_tr, y_tr)
+            eval_res = clf.evaluate(X_te, y_te)
+            acc_list.append(eval_res['accuracy'])
+            prec_list.append(eval_res['precision'])
+            rec_list.append(eval_res['recall'])
+            f1_list.append(eval_res['f1_score'])
+            cm_total += eval_res['confusion_matrix']
+        
+        return {
+            'accuracy': float(np.mean(acc_list)),
+            'accuracy_std': float(np.std(acc_list)),
+            'precision': float(np.mean(prec_list)),
+            'precision_std': float(np.std(prec_list)),
+            'recall': float(np.mean(rec_list)),
+            'recall_std': float(np.std(rec_list)),
+            'f1_score': float(np.mean(f1_list)),
+            'f1_score_std': float(np.std(f1_list)),
+            'confusion_matrix': cm_total
+        }, cm_total
 
-    # Model on Raw Noisy Signal
-    clf_raw = ECGHeartbeatClassifier(model_type='rf')
-    clf_raw.train(X_raw_tr, y_tr)
-    eval_raw = clf_raw.evaluate(X_raw_te, y_te)
+    eval_raw, cm_raw = evaluate_cv(X_raw, y_raw, groups_raw)
+    eval_filt, cm_filt = evaluate_cv(X_filt, y_filt, groups_filt)
 
-    # Model on Filtered DSP Signal
-    clf_filt = ECGHeartbeatClassifier(model_type='rf')
-    clf_filt.train(X_filt_tr, y_tr)
-    eval_filt = clf_filt.evaluate(X_filt_te, y_te)
+    # Train a final model on 70% data for the Streamlit dashboard
+    all_groups = np.unique(groups_filt)
+    np.random.seed(42)
+    np.random.shuffle(all_groups)
+    split_idx = int(len(all_groups) * 0.7)
+    train_groups = set(all_groups[:split_idx])
+    train_idx_filt = np.array([i for i, g in enumerate(groups_filt) if g in train_groups])
+    clf_final = ECGHeartbeatClassifier(model_type='rf')
+    if len(train_idx_filt) > 0:
+        clf_final.train(X_filt[train_idx_filt], y_filt[train_idx_filt])
 
     return {
         'dsp_metrics': dsp_metrics,
         'raw_model_metrics': eval_raw,
         'filtered_model_metrics': eval_filt,
-        'trained_filtered_model': clf_filt
+        'trained_filtered_model': clf_final,
+        'cm_raw': cm_raw,
+        'cm_filt': cm_filt,
+        'dataset_info': {
+             'n_segments': len(np.unique(groups_raw)),
+             'n_raw_beats': len(X_raw),
+             'n_filt_beats': len(X_filt),
+             'y_raw_counts': np.bincount(y_raw, minlength=5).tolist() if len(y_raw) > 0 else [],
+             'y_filt_counts': np.bincount(y_filt, minlength=5).tolist() if len(y_filt) > 0 else []
+        }
     }
