@@ -29,3 +29,38 @@ def test_pan_tompkins_qrs():
             
     sensitivity = matched_peaks / len(ground_truth_peaks) if len(ground_truth_peaks) > 0 else 0
     assert sensitivity >= 0.90, f"Sensitivity is too low: {sensitivity}"
+
+from qrs_detector import calculate_advanced_hrv_metrics, extract_beat_features
+
+def test_advanced_hrv_metrics():
+    # Construct a dummy peak array for 60 seconds (1 peak per second)
+    fs = 360
+    dummy_peaks = np.arange(0, 60 * fs, fs)
+    
+    # Perfectly regular -> zero variance -> LF/HF should be handled gracefully
+    metrics = calculate_advanced_hrv_metrics(dummy_peaks, fs=fs)
+    assert 'lf' in metrics
+    assert 'hf' in metrics
+    assert 'lf_hf_ratio' in metrics
+    assert 'sd1' in metrics
+    assert 'sd2' in metrics
+    
+    # Zero variance check
+    assert metrics['lf'] == 0.0
+    assert metrics['hf'] == 0.0
+    assert np.isnan(metrics['lf_hf_ratio'])
+    assert metrics['sd1'] == 0.0
+    assert metrics['sd2'] == 0.0
+    
+    # Short array handling
+    short_metrics = calculate_advanced_hrv_metrics(dummy_peaks[:2], fs=fs)
+    assert np.isnan(short_metrics['lf'])
+
+def test_extract_beat_features():
+    fs = 360
+    ecg_data = generate_synthetic_ecg(duration_sec=10.0, fs=fs, condition='NSR')
+    pt_res = pan_tompkins_qrs(ecg_data['signal'], fs=fs)
+    
+    if len(pt_res['r_peaks']) >= 3:
+        features, _ = extract_beat_features(ecg_data['signal'], pt_res['r_peaks'], fs=fs)
+        assert features.shape[1] == 17, f"Expected 17 features, got {features.shape[1]}"

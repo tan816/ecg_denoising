@@ -94,6 +94,66 @@ def calculate_hrv_metrics(rr_intervals_ms: np.ndarray) -> Dict[str, float]:
     }
 
 
+def calculate_advanced_hrv_metrics(r_peaks: np.ndarray, fs: float = 360.0) -> Dict[str, Any]:
+    """
+    Calculates advanced HRV metrics including Frequency-Domain (LF, HF, LF/HF)
+    using the Lomb-Scargle periodogram (appropriate for unevenly sampled RR series),
+    and Non-Linear Poincaré features (SD1, SD2, coordinates).
+    """
+    if len(r_peaks) < 4:
+        return {
+            'lf': np.nan, 'hf': np.nan, 'lf_hf_ratio': np.nan,
+            'sd1': np.nan, 'sd2': np.nan,
+            'poincare_coords': ([], [])
+        }
+
+    # RR series
+    rr_sec = np.diff(r_peaks) / fs
+    rr_ms = rr_sec * 1000.0
+    t_rr = r_peaks[1:] / fs  # Time of occurrence of each RR interval
+
+    # 1. Frequency Domain (Lomb-Scargle)
+    # Define frequencies: 0.01 to 0.5 Hz
+    f = np.linspace(0.01, 0.5, 1000)
+    w = 2 * np.pi * f
+    # Subtract mean before periodogram
+    rr_centered = rr_ms - np.mean(rr_ms)
+    
+    # Check if signal has zero variance (e.g., constant synthetic RR)
+    if np.var(rr_centered) < 1e-6:
+        lf, hf, lf_hf = 0.0, 0.0, np.nan
+    else:
+        pgram = signal.lombscargle(t_rr, rr_centered, w, normalize=False)
+        # Scale to PSD (approximation)
+        df = f[1] - f[0]
+        
+        lf_mask = (f >= 0.04) & (f < 0.15)
+        hf_mask = (f >= 0.15) & (f < 0.40)
+        
+        lf = float(np.sum(pgram[lf_mask]) * df)
+        hf = float(np.sum(pgram[hf_mask]) * df)
+        lf_hf = float(lf / hf) if hf > 0 else np.nan
+
+    # 2. Poincaré Non-linear Analysis
+    rr_n = rr_ms[:-1]
+    rr_n1 = rr_ms[1:]
+    
+    if len(rr_n) < 2:
+        sd1, sd2 = np.nan, np.nan
+    else:
+        sd1 = float(np.sqrt(0.5 * np.std(rr_n1 - rr_n)**2))
+        sd2 = float(np.sqrt(0.5 * np.std(rr_n1 + rr_n)**2))
+
+    return {
+        'lf': lf,
+        'hf': hf,
+        'lf_hf_ratio': lf_hf,
+        'sd1': sd1,
+        'sd2': sd2,
+        'poincare_coords': (rr_n.tolist(), rr_n1.tolist())
+    }
+
+
 def extract_beat_features(ecg_signal: np.ndarray, r_peaks: np.ndarray, fs: float = 360.0) -> Tuple[np.ndarray, List[Dict[str, Any]]]:
     """
     Extracts comprehensive clinical and morphological feature vectors per heartbeat.
@@ -110,6 +170,11 @@ def extract_beat_features(ecg_signal: np.ndarray, r_peaks: np.ndarray, fs: float
     9. Q-wave Depth (mV)
     10. S-wave Depth (mV)
     11. T-peak Amplitude (mV)
+    12. LF Power (Global segment feature)
+    13. HF Power (Global segment feature)
+    14. LF/HF Ratio (Global segment feature)
+    15. Poincaré SD1 (Global segment feature)
+    16. Poincaré SD2 (Global segment feature)
     """
     N = len(ecg_signal)
     n_peaks = len(r_peaks)
@@ -119,6 +184,8 @@ def extract_beat_features(ecg_signal: np.ndarray, r_peaks: np.ndarray, fs: float
         
     rr_intervals_sec = np.diff(r_peaks) / fs
     mean_rr = np.mean(rr_intervals_sec)
+    
+    adv_hrv = calculate_advanced_hrv_metrics(r_peaks, fs=fs)
     
     feature_matrix = []
     clinical_records = []
@@ -189,7 +256,12 @@ def extract_beat_features(ecg_signal: np.ndarray, r_peaks: np.ndarray, fs: float
             q_amp,
             s_amp,
             p_amp,
-            t_amp
+            t_amp,
+            adv_hrv['lf'],
+            adv_hrv['hf'],
+            adv_hrv['lf_hf_ratio'],
+            adv_hrv['sd1'],
+            adv_hrv['sd2']
         ]
         feature_matrix.append(feat_vector)
         

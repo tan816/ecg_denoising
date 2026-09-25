@@ -10,20 +10,20 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
+import plotly.express as px
 from plotly.subplots import make_subplots
 
 from data_loader import load_mitbih_record, generate_synthetic_ecg, inject_noise, compute_snr, compute_mse, compute_psnr, HAS_WFDB
 from dsp_filters import apply_dsp_pipeline, highpass_filter, notch_filter, lowpass_filter, wavelet_denoise
-from qrs_detector import pan_tompkins_qrs, extract_beat_features, calculate_hrv_metrics
+from qrs_detector import pan_tompkins_qrs, extract_beat_features, calculate_hrv_metrics, calculate_advanced_hrv_metrics
 from ml_classifier import ECGHeartbeatClassifier, CLASS_NAMES, CLASS_MAP
 
 # Page config
 st.set_page_config(
-    page_title="ECG DSP & ML Diagnosis Dashboard",
+    page_title="BreakNoHeart",
     page_icon="🫀",
     layout="wide"
 )
-
 
 @st.cache_resource
 def load_trained_classifier():
@@ -33,16 +33,26 @@ def load_trained_classifier():
                 return pickle.load(f)
         except Exception:
             pass
-    # Fallback fit
     from ml_classifier import run_full_ml_benchmark
     res = run_full_ml_benchmark(n_samples_per_class=8)
     return res['trained_filtered_model']
 
+def plot_confusion_matrix(cm, title):
+    fig = px.imshow(cm,
+                    labels=dict(x="Predicted Condition", y="True Condition", color="Count"),
+                    x=CLASS_NAMES,
+                    y=CLASS_NAMES,
+                    color_continuous_scale="Blues",
+                    text_auto=True)
+    fig.update_layout(title=title, width=500, height=500)
+    return fig
 
 def main():
     st.title("🫀 ECG Signal Processing & Diagnostic Machine Learning Dashboard")
+    
     st.markdown("""
-    **End-to-End Pipeline**: Biomedical DSP Noise Removal (Butterworth & DWT Wavelet) $\\rightarrow$ Pan-Tompkins QRS Peak Detection $\\rightarrow$ Clinical Feature Extraction $\\rightarrow$ 5-Class ML Heart Condition Diagnosis.
+    **Methodology & Limitations:**
+    This pipeline utilizes a synthetic dataset containing controlled mathematical rhythm patterns (e.g., deterministic variance in AFib and PVCs). The advanced HRV features (LF/HF, SD1, SD2) strongly expose these mathematically rigid patterns, which is why the classifier achieves very high (up to 100%) performance. This 100% synthetic classification accuracy validates the DSP and feature extraction math, but is **not** equivalent to real-world clinical performance where biological variance is far higher. Real MIT-BIH data can be loaded for compatibility and generalization checks.
     """)
 
     # Load Model
@@ -130,6 +140,7 @@ def main():
         feats, clin_recs = extract_beat_features(filtered_ecg, r_peaks, fs=fs)
         rr_ms = np.diff(r_peaks) / fs * 1000.0
         hrv = calculate_hrv_metrics(rr_ms)
+        adv_hrv = calculate_advanced_hrv_metrics(r_peaks, fs=fs)
         avg_hr = float(np.mean([r['hr_bpm'] for r in clin_recs]))
 
         # Predict ML Condition
@@ -142,38 +153,30 @@ def main():
     else:
         avg_hr = 0.0
         hrv = {'sdnn': 0.0, 'rmssd': 0.0, 'pnn50': 0.0}
+        adv_hrv = {'lf': np.nan, 'hf': np.nan, 'lf_hf_ratio': np.nan, 'sd1': np.nan, 'sd2': np.nan, 'poincare_coords': ([], [])}
         pred_condition = "N/A"
         confidence = 0.0
         avg_proba = np.zeros(5)
         clin_recs = []
 
-    # Dashboard Metrics Row
-    m1, m2, m3, m4, m5, m6 = st.columns(6)
-    m1.metric("Input SNR", f"{snr_in:.2f} dB")
-    m2.metric("Output SNR", f"{snr_out:.2f} dB", f"+{delta_snr:.2f} dB")
-    m3.metric("MSE", f"{mse_val:.4f}")
-    m4.metric("PSNR", f"{psnr_val:.2f} dB")
-    m5.metric("Heart Rate", f"{avg_hr:.1f} BPM")
-    m6.metric("Diagnosis", f"{pred_condition}", f"{confidence:.1f}% conf")
-
     # Main Tabs
-    tab1, tab2, tab3, tab4 = st.tabs([
-        "📈 Interactive Waveforms & QRS Peaks", 
-        "🔍 Filter Stage Cascade Breakdown", 
-        "📊 Frequency Spectrum (FFT)", 
-        "📋 Clinical Features & ML Performance"
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "📈 Signal Processing", 
+        "🔍 DSP Analysis", 
+        "📋 QRS & HRV",
+        "🧠 Diagnosis",
+        "📊 Model Evaluation"
     ])
 
     time_arr = np.arange(len(raw_noisy)) / fs
 
     with tab1:
-        st.subheader("Raw Noisy Signal vs DSP Filtered Waveform & Pan-Tompkins R-Peaks")
+        st.subheader("Signal Processing")
         fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08,
-                            subplot_titles=("Raw / Noisy ECG Input Signal", "DSP Filtered ECG Signal & Detected R-Peaks"))
+                            subplot_titles=("Raw / Noisy Signal", "Filtered Signal"))
 
         # Raw plot
         fig.add_trace(go.Scatter(x=time_arr, y=raw_noisy, name="Raw Noisy Signal", line=dict(color='red', width=1)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=time_arr, y=clean_ecg, name="Clean Ground Truth", line=dict(color='lightgray', width=1, dash='dash')), row=1, col=1)
 
         # Filtered plot
         fig.add_trace(go.Scatter(x=time_arr, y=filtered_ecg, name="DSP Filtered Signal", line=dict(color='green', width=1.5)), row=2, col=1)
@@ -183,7 +186,7 @@ def main():
                 mode='markers', name='Detected R-Peaks',
                 marker=dict(color='magenta', size=9, symbol='diamond')
             ), row=2, col=1)
-
+            
         fig.update_layout(height=520, margin=dict(l=20, r=20, t=40, b=20), hovermode="x unified")
         fig.update_xaxes(title_text="Time (seconds)", row=2, col=1)
         fig.update_yaxes(title_text="Amplitude (mV)", row=1, col=1)
@@ -191,25 +194,13 @@ def main():
         st.plotly_chart(fig, use_container_width=True)
 
     with tab2:
-        st.subheader("Stage-by-Stage DSP Filtering Breakdown")
-        dsp_cascade = apply_dsp_pipeline(raw_noisy, fs=fs)
+        st.subheader("DSP Analysis & Signal Quality")
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("Input SNR", f"{snr_in:.2f} dB")
+        m2.metric("Output SNR", f"{snr_out:.2f} dB", f"{delta_snr:+.2f} dB")
+        m3.metric("MSE", f"{mse_val:.4f}")
+        m4.metric("PSNR", f"{psnr_val:.2f} dB")
         
-        fig_cas = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.04,
-                                subplot_titles=(
-                                    "1. High-pass Filtered (0.5 Hz) -> Baseline Wander Removed",
-                                    "2. Notch Filtered (50 Hz) -> Powerline Suppressed",
-                                    "3. Low-pass Filtered (45 Hz) -> High-Freq EMG Removed",
-                                    "4. DWT Wavelet Denoised (db6) -> Clean Final ECG"
-                                ))
-        fig_cas.add_trace(go.Scatter(x=time_arr, y=dsp_cascade['hp_filtered'], line=dict(color='orange')), row=1, col=1)
-        fig_cas.add_trace(go.Scatter(x=time_arr, y=dsp_cascade['notch_filtered'], line=dict(color='blue')), row=2, col=1)
-        fig_cas.add_trace(go.Scatter(x=time_arr, y=dsp_cascade['lp_filtered'], line=dict(color='purple')), row=3, col=1)
-        fig_cas.add_trace(go.Scatter(x=time_arr, y=dsp_cascade['final_filtered'], line=dict(color='green')), row=4, col=1)
-        
-        fig_cas.update_layout(height=650, margin=dict(l=20, r=20, t=40, b=20))
-        st.plotly_chart(fig_cas, use_container_width=True)
-
-    with tab3:
         st.subheader("Frequency Spectrum Analysis (Fast Fourier Transform)")
         # FFT computation
         N_fft = len(raw_noisy)
@@ -218,10 +209,9 @@ def main():
         fft_filt = np.abs(np.fft.rfft(filtered_ecg))
 
         fig_fft = go.Figure()
-        fig_fft.add_trace(go.Scatter(x=freqs, y=fft_raw, name="Raw Signal Spectrum", line=dict(color='red', width=1)))
-        fig_fft.add_trace(go.Scatter(x=freqs, y=fft_filt, name="Filtered Signal Spectrum", line=dict(color='green', width=1.5)))
+        fig_fft.add_trace(go.Scatter(x=freqs, y=fft_raw, name="FFT before filtering", line=dict(color='red', width=1)))
+        fig_fft.add_trace(go.Scatter(x=freqs, y=fft_filt, name="FFT after filtering", line=dict(color='green', width=1.5)))
         fig_fft.update_layout(
-            title="Magnitude Spectrum (0 to 100 Hz)",
             xaxis_title="Frequency (Hz)",
             yaxis_title="Magnitude",
             xaxis=dict(range=[0, 100]),
@@ -229,36 +219,107 @@ def main():
         )
         st.plotly_chart(fig_fft, use_container_width=True)
 
-    with tab4:
+    with tab3:
+        st.subheader("QRS & Heart Rate Variability")
         c1, c2 = st.columns(2)
         with c1:
-            st.subheader("Extracted Heartbeat Clinical Parameters")
+            st.markdown("**Traditional Features**")
             st.json({
-                "Detected R-Peaks Count": len(r_peaks),
-                "Average Heart Rate (BPM)": round(avg_hr, 1),
+                "Heart Rate (BPM)": round(avg_hr, 1),
+                "Mean RR Interval (ms)": round(float(np.mean(rr_ms)) if len(r_peaks) > 1 else 0.0, 1),
                 "SDNN (ms)": round(hrv['sdnn'], 2),
                 "RMSSD (ms)": round(hrv['rmssd'], 2),
                 "pNN50 (%)": round(hrv['pnn50'], 2),
-                "Mean QRS Duration (ms)": round(float(np.mean([r['qrs_width_ms'] for r in clin_recs])) if len(clin_recs)>0 else 80.0, 1),
-                "Mean PR Interval (ms)": round(float(np.mean([r['pr_interval_ms'] for r in clin_recs])) if len(clin_recs)>0 else 140.0, 1),
-                "Mean QT Interval (ms)": round(float(np.mean([r['qt_interval_ms'] for r in clin_recs])) if len(clin_recs)>0 else 380.0, 1)
+                "Mean QRS Duration (ms)": round(float(np.mean([r['qrs_width_ms'] for r in clin_recs if not np.isnan(r['qrs_width_ms'])])) if len(clin_recs)>0 else np.nan, 1),
+                "Mean PR Interval (ms)": round(float(np.mean([r['pr_interval_ms'] for r in clin_recs if not np.isnan(r['pr_interval_ms'])])) if len(clin_recs)>0 else np.nan, 1),
+                "Mean QT Interval (ms)": round(float(np.mean([r['qt_interval_ms'] for r in clin_recs if not np.isnan(r['qt_interval_ms'])])) if len(clin_recs)>0 else np.nan, 1)
+            })
+
+            st.markdown("**Advanced Frequency HRV**")
+            st.json({
+                "LF Power": round(adv_hrv['lf'], 3) if not np.isnan(adv_hrv['lf']) else "NaN",
+                "HF Power": round(adv_hrv['hf'], 3) if not np.isnan(adv_hrv['hf']) else "NaN",
+                "LF/HF Ratio": round(adv_hrv['lf_hf_ratio'], 3) if not np.isnan(adv_hrv['lf_hf_ratio']) else "NaN"
+            })
+            
+            st.markdown("**Poincaré Features**")
+            st.json({
+                "SD1 (Short-term variance)": round(adv_hrv['sd1'], 3) if not np.isnan(adv_hrv['sd1']) else "NaN",
+                "SD2 (Long-term variance)": round(adv_hrv['sd2'], 3) if not np.isnan(adv_hrv['sd2']) else "NaN"
             })
 
         with c2:
-            st.subheader("Machine Learning Condition Prediction")
-            df_prob = pd.DataFrame({
-                'Cardiac Condition': CLASS_NAMES,
-                'Probability': avg_proba * 100.0
-            })
-            fig_prob = go.Figure(go.Bar(
-                x=df_prob['Probability'],
-                y=df_prob['Cardiac Condition'],
-                orientation='h',
-                marker=dict(color=['#2ecc71' if c == pred_condition else '#3498db' for c in CLASS_NAMES])
-            ))
-            fig_prob.update_layout(title="Prediction Probability Distribution (%)", xaxis_title="Probability (%)", height=320)
-            st.plotly_chart(fig_prob, use_container_width=True)
+            st.markdown("**Poincaré Plot**")
+            rr_n, rr_n1 = adv_hrv['poincare_coords']
+            if len(rr_n) > 0:
+                fig_poincare = go.Figure()
+                fig_poincare.add_trace(go.Scatter(
+                    x=rr_n, y=rr_n1, mode='markers', name='RR intervals',
+                    marker=dict(color='blue', size=8, opacity=0.7)
+                ))
+                # Add line of identity
+                min_rr = min(min(rr_n), min(rr_n1)) * 0.95
+                max_rr = max(max(rr_n), max(rr_n1)) * 1.05
+                fig_poincare.add_trace(go.Scatter(
+                    x=[min_rr, max_rr], y=[min_rr, max_rr], 
+                    mode='lines', name='Line of Identity', 
+                    line=dict(color='gray', dash='dash')
+                ))
+                fig_poincare.update_layout(
+                    xaxis_title="RR_n (ms)",
+                    yaxis_title="RR_n+1 (ms)",
+                    height=450,
+                    showlegend=False
+                )
+                st.plotly_chart(fig_poincare, use_container_width=True)
+            else:
+                st.info("Not enough RR intervals to plot Poincaré.")
 
+    with tab4:
+        st.subheader("Machine Learning Diagnosis")
+        st.markdown(f"**Model prediction on the evaluated dataset:** `{pred_condition}`")
+        
+        df_prob = pd.DataFrame({
+            'Cardiac Condition': CLASS_NAMES,
+            'Probability': avg_proba * 100.0
+        })
+        fig_prob = go.Figure(go.Bar(
+            x=df_prob['Probability'],
+            y=df_prob['Cardiac Condition'],
+            orientation='h',
+            marker=dict(color=['#2ecc71' if c == pred_condition else '#3498db' for c in CLASS_NAMES])
+        ))
+        fig_prob.update_layout(title="Prediction Probability Distribution (%)", xaxis_title="Probability (%)", height=320)
+        st.plotly_chart(fig_prob, use_container_width=True)
+
+    with tab5:
+        st.subheader("Model Evaluation (5-Fold StratifiedGroupKFold)")
+        st.markdown("The table below highlights ablation study metrics, comparing model performance across configurations.")
+        
+        # Hardcoded results from the ablation study and pipeline tests
+        eval_data = {
+            "Configuration": ["Raw + 12 features", "DSP + 12 features", "Raw + 17 features", "DSP + 17 features"],
+            "Accuracy": ["90.44 ± 0.51%", "93.21 ± 0.40%", "97.91 ± 4.18%", "100.00 ± 0.00%"],
+            "Precision": ["90.35 ± 0.70%", "93.64 ± 0.67%", "97.98 ± 4.03%", "100.00 ± 0.00%"],
+            "Recall": ["89.34 ± 0.54%", "92.45 ± 0.44%", "97.20 ± 5.59%", "100.00 ± 0.00%"],
+            "Macro F1": ["89.41 ± 0.58%", "92.26 ± 0.42%", "97.35 ± 5.29%", "100.00 ± 0.00%"]
+        }
+        st.table(pd.DataFrame(eval_data))
+        
+        col1, col2 = st.columns(2)
+        try:
+            if os.path.exists('cm_raw.npy') and os.path.exists('cm_filt.npy'):
+                cm_raw = np.load('cm_raw.npy')
+                cm_filt = np.load('cm_filt.npy')
+                
+                with col1:
+                    st.plotly_chart(plot_confusion_matrix(cm_raw, "Raw Noisy Signal (17 features)"), use_container_width=True)
+                with col2:
+                    st.plotly_chart(plot_confusion_matrix(cm_filt, "DSP Filtered Signal (17 features)"), use_container_width=True)
+            else:
+                st.warning("Confusion matrix files (cm_raw.npy, cm_filt.npy) not found. Run the pipeline to generate them.")
+        except Exception as e:
+            st.error(f"Error loading confusion matrices: {e}")
 
 if __name__ == '__main__':
     main()
